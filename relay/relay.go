@@ -46,10 +46,6 @@ func main() {
 				log.Printf("ParseMessage: %+v\n", err)
 				continue
 			}
-			if sessionId != 0 {
-				log.Printf("ParseMessage: Wrong session id: %d\n", sessionId)
-				continue
-			}
 			if len(data) < 4 {
 				log.Print("ParseMessage: Message too short\n")
 				continue
@@ -65,13 +61,22 @@ func main() {
 					continue
 				}
 				
-				ip := (net.IP)(targetAddr[:len(targetAddr) - 2])
+				serverAddr := gt.BytesToUDPAddr(targetAddr)
 				log.Printf("%s request %d, return %s:%d\n",
 					remoteAddr.String(), targetId,
-					ip.String(), binary.LittleEndian.Uint16(targetAddr[len(targetAddr) - 2:]))
+					serverAddr.IP.String(), serverAddr.Port)
 				
-				size := gt.MakeMessage(buf, 0, gt.TYPE_QUERY_ANSWER, targetAddr)
+				// Write to client: query answer
+				size := gt.MakeMessage(buf, sessionId, gt.TYPE_QUERY_ANSWER, targetAddr)
 				_, err := listener.WriteToUDP(buf[:size], remoteAddr)
+				if err != nil {
+					log.Printf("Write UDP: %+v\n", err)
+				}
+				
+				// Write to server: connect request
+				size = gt.MakeMessage(buf, sessionId, gt.TYPE_REVERSE_CONNECT, nil)
+				size += gt.UDPAddrToBytes(remoteAddr, buf[size:])
+				_, err = listener.WriteToUDP(buf[:size+2], serverAddr)
 				if err != nil {
 					log.Printf("Write UDP: %+v\n", err)
 				}
@@ -81,23 +86,6 @@ func main() {
 				gt.UDPAddrToBytes(remoteAddr, targetAddr)
 				cache.Set(string(targetId), targetAddr, time.Now().Add(60 * time.Second))
 				log.Printf("%d server keep alive, addr: %s\n", targetId, remoteAddr.String())
-			
-			case gt.TYPE_REVERSE_CONNECT:
-				targetAddr, found := cache.Get(string(targetId))
-				if !found {
-					log.Printf("%s request reverse connect %d but not found\n", remoteAddr.String(), targetId)
-					continue
-				}
-				log.Printf("%s request reverse connect %d\n", remoteAddr.String(), targetId)
-				size = gt.MakeMessage(buf, 0, gt.TYPE_REVERSE_CONNECT, nil)
-				// Copy session id
-				size += copy(buf[size:], data[:4])
-				size += copy(buf[size:], remoteAddr.IP)
-				binary.LittleEndian.PutUint16(buf[size:], uint16(remoteAddr.Port))
-				_, err := listener.WriteToUDP(buf[:size+2], gt.BytesToUDPAddr(targetAddr))
-				if err != nil {
-					log.Printf("Write UDP: %+v\n", err)
-				}
 			
 			default:
 				log.Printf("ParseMessage: Wrong type id: %d\n", targetId)

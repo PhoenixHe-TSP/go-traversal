@@ -16,8 +16,8 @@ import (
 var (
 	// atomic
 	serverAddrPtr, localAddrPtr unsafe.Pointer
-	globalSessionId			 uint32
-	die chan int
+	globalSessionId             uint32
+	die                         chan int
 )
 
 func clientForward(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
@@ -52,7 +52,7 @@ func clientForward(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
 func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.UDPConn, input chan int) {
 	buf := make([]byte, 1500)
 	connected := false
-
+	
 	for {
 		size, remoteAddr, err := relayConn.ReadFromUDP(buf)
 		if err != nil {
@@ -62,18 +62,16 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 		
 		data, sessionId, typeId, err := gt.ParseMessage(buf[:size])
 		if err != nil {
-			if err != nil {
-				log.Printf("ParseMessage: %+v\n", err)
-				continue
-			}
+			log.Printf("ParseMessage: %+v\n", err)
+			continue
+		}
+		if sessionId != globalSessionId {
+			log.Printf("ParseMessage: Wrong session id: %d\n", sessionId)
+			continue
 		}
 		
 		switch typeId {
 		case gt.TYPE_QUERY_ANSWER:
-			if sessionId != 0 {
-				log.Printf("ParseMessage: Wrong session id: %d\n", sessionId)
-				continue
-			}
 			if len(data) < 10 {
 				log.Print("QUERY_ANWSER: Packet too short\n")
 				continue
@@ -83,12 +81,8 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(addr))
 			log.Printf("Got query answer, server %d has addr %s\n",
 				targetId, addr.String())
-
+		
 		case gt.TYPE_DATA, gt.TYPE_KEEP_ALIVE:
-			if sessionId != globalSessionId {
-				log.Printf("DATA: Wrong sessionId %d\n", sessionId)
-				continue
-			}
 			input <- 0
 			// TODO: notify relay if this address changed?
 			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(remoteAddr))
@@ -106,7 +100,7 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 					targetId, remoteAddr.String())
 				connected = true
 			}
-
+		
 		default:
 			log.Printf("ParseMessage: Unknown typeId: %d\n", typeId)
 		}
@@ -127,20 +121,12 @@ func clientCheckTimeout(input chan int) {
 	}
 }
 
-func clientQuerySend(relayConn *net.UDPConn, relayAddr *net.UDPAddr, targetId uint32, reverseConnect bool) {
+func clientQuerySend(relayConn *net.UDPConn, relayAddr *net.UDPAddr, targetId uint32) {
 	query := make([]byte, 1500)
-	if reverseConnect {
-		t := make([]byte, 8)
-		binary.LittleEndian.PutUint32(t[:4], targetId)
-		binary.LittleEndian.PutUint32(t[4:], globalSessionId)
-		size := gt.MakeMessage(query, 0, gt.TYPE_REVERSE_CONNECT, t)
-		query = query[:size]
-	} else {
-		t := make([]byte, 4)
-		binary.LittleEndian.PutUint32(t, targetId)
-		size := gt.MakeMessage(query, 0, gt.TYPE_QUERY, t)
-		query = query[:size]
-	}
+	t := make([]byte, 4)
+	binary.LittleEndian.PutUint32(t, targetId)
+	size := gt.MakeMessage(query, globalSessionId, gt.TYPE_QUERY, t)
+	query = query[:size]
 	
 	for {
 		_, err := relayConn.WriteToUDP(query, relayAddr)
@@ -168,28 +154,24 @@ func main() {
 	myApp.Name = "go-traversal-client"
 	myApp.Flags = []cli.Flag{
 		cli.StringFlag{
-			Name:	"listen,l",
+			Name:  "listen,l",
 			Value: ":8008",
 			Usage: "local listen address",
 		},
 		cli.StringFlag{
-			Name:	"forward,f",
+			Name:  "forward,f",
 			Value: ":8001",
 			Usage: "local forward address",
 		},
 		cli.StringFlag{
-			Name:	"relay,r",
+			Name:  "relay,r",
 			Value: "127.0.0.1:8007",
 			Usage: "relay server address",
 		},
 		cli.StringFlag{
-			Name:	"server-id,i",
+			Name:  "server-id,i",
 			Value: "7",
 			Usage: "target server id",
-		},
-		cli.StringFlag{
-			Name: "reverse-connect,R",
-			Usage: "ask server to connect client",
 		},
 	}
 	
@@ -201,17 +183,16 @@ func main() {
 		
 		relayAddr, err := net.ResolveUDPAddr("udp4", c.String("relay"))
 		gt.CheckError(err)
-
+		
 		forwardAddr, err := net.ResolveUDPAddr("udp", c.String("forward"))
 		gt.CheckError(err)
 		forwardListener, err := net.ListenUDP("udp", forwardAddr)
 		gt.CheckError(err)
 		
 		targetId := uint32(c.Int("server-id"))
-		reverseConnect := c.Bool("reverse-connect")
 		globalSessionId = rand.Uint32()
 		
-		go clientQuerySend(listener, relayAddr, targetId, reverseConnect)
+		go clientQuerySend(listener, relayAddr, targetId)
 		go clientForward(forwardListener, listener)
 		input := make(chan int)
 		die = make(chan int)
@@ -220,6 +201,6 @@ func main() {
 		
 		return nil
 	}
-
+	
 	myApp.Run(os.Args)
 }

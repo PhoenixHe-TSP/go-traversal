@@ -120,6 +120,9 @@ CLEAR_TIMEOUT:
 			}
 		}
 		
+		if size == 0 {
+			continue
+		}
 		data, sessionId, typeId, err := gt.ParseMessage(buf[:size])
 		if err != nil {
 			log.Printf("ParseMessage: %+v\n", err)
@@ -130,8 +133,7 @@ CLEAR_TIMEOUT:
 		case gt.TYPE_DATA, gt.TYPE_KEEP_ALIVE:
 			
 		case gt.TYPE_REVERSE_CONNECT:
-			sessionId = binary.LittleEndian.Uint32(data[:4])
-			remoteAddr = gt.BytesToUDPAddr(data[4:])
+			remoteAddr = gt.BytesToUDPAddr(data)
 
 		default:
 			log.Printf("ParseMessage: Unknown typeId: %d\n", typeId)
