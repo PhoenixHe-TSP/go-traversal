@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	TYPE_DATA              = 1
-	TYPE_QUERY             = 2
-	TYPE_QUERY_ANSWER      = 3
-	TYPE_SERVER_KEEP_ALIVE = 4
-	TYPE_CLIENT_KEEP_ALIVE = 5
+	TYPE_DATA            = 1
+	TYPE_QUERY           = 2
+	TYPE_QUERY_ANSWER    = 3
+	TYPE_KEEP_ALIVE      = 4
+	TYPE_REVERSE_CONNECT = 5
 )
 
 func MakeMessage(packet []byte, sessionId uint32, typeId uint8, content []byte) (size int) {
@@ -33,12 +33,12 @@ func ParseMessage(packet []byte) (data []byte, sessionId uint32, typeId uint8, e
 	if len(packet) < 5 {
 		return nil, 0, 0, errors.New("Message too short")
 	}
-
+	
 	sessionId = binary.LittleEndian.Uint32(packet[:4])
 	packet = packet[4:]
 	typeId = packet[0]
 	data = packet[1:]
-
+	
 	return
 }
 
@@ -57,4 +57,18 @@ func CheckError(err error) {
 		log.Printf("%+v\n", err)
 		os.Exit(-1)
 	}
+}
+
+func UDPAddrToBytes(addr *net.UDPAddr, output []byte) (size int) {
+	// TODO check size?
+	size = copy(output, addr.IP)
+	binary.LittleEndian.PutUint16(output[size:], uint16(addr.Port))
+	return size + 2
+}
+
+func BytesToUDPAddr(input []byte) (*net.UDPAddr) {
+	ip := (net.IP)(make([]byte, len(input)-2))
+	copy(ip, input)
+	port := int(binary.LittleEndian.Uint16(input[len(input)-2:]))
+	return &net.UDPAddr{ip, port, ""}
 }

@@ -28,7 +28,7 @@ func main() {
 	myApp.Action = func(c *cli.Context) error {
 		listenAddr, err := net.ResolveUDPAddr("udp4", c.String("listen"));
 		gt.CheckError(err)
-		listener, err := net.ListenUDP("udp", listenAddr)
+		listener, err := net.ListenUDP("udp4", listenAddr)
 		gt.CheckError(err)
 
 		cache := cmap.New()
@@ -55,6 +55,7 @@ func main() {
 				continue
 			}
 			targetId := binary.LittleEndian.Uint32(data[:4])
+			data = data[4:]
 
 			switch typeId {
 			case gt.TYPE_QUERY:
@@ -75,12 +76,28 @@ func main() {
 					log.Printf("Write UDP: %+v\n", err)
 				}
 
-			case gt.TYPE_SERVER_KEEP_ALIVE:
+			case gt.TYPE_KEEP_ALIVE:
 				targetAddr := make([]byte, len(remoteAddr.IP) + 2)
-				copy(targetAddr, remoteAddr.IP)
-				binary.LittleEndian.PutUint16(targetAddr[len(remoteAddr.IP):], uint16(remoteAddr.Port))
+				gt.UDPAddrToBytes(remoteAddr, targetAddr)
 				cache.Set(string(targetId), targetAddr, time.Now().Add(60 * time.Second))
 				log.Printf("%d server keep alive, addr: %s\n", targetId, remoteAddr.String())
+			
+			case gt.TYPE_REVERSE_CONNECT:
+				targetAddr, found := cache.Get(string(targetId))
+				if !found {
+					log.Printf("%s request reverse connect %d but not found\n", remoteAddr.String(), targetId)
+					continue
+				}
+				log.Printf("%s request reverse connect %d\n", remoteAddr.String(), targetId)
+				size = gt.MakeMessage(buf, 0, gt.TYPE_REVERSE_CONNECT, nil)
+				// Copy session id
+				size += copy(buf[size:], data[:4])
+				size += copy(buf[size:], remoteAddr.IP)
+				binary.LittleEndian.PutUint16(buf[size:], uint16(remoteAddr.Port))
+				_, err := listener.WriteToUDP(buf[:size+2], gt.BytesToUDPAddr(targetAddr))
+				if err != nil {
+					log.Printf("Write UDP: %+v\n", err)
+				}
 			
 			default:
 				log.Printf("ParseMessage: Wrong type id: %d\n", targetId)

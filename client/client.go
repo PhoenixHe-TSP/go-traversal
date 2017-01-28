@@ -17,33 +17,41 @@ var (
 	// atomic
 	serverAddrPtr, localAddrPtr unsafe.Pointer
 	globalSessionId			 uint32
+	die chan int
 )
 
 func clientForward(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
-	buf := make([]byte, 1500)
-	headerSize := gt.MakeMessage(buf, globalSessionId, gt.TYPE_DATA, nil)
-	recvBuf := buf[headerSize:]
+	packet := make([]byte, 1500)
+	size := gt.MakeMessage(packet, globalSessionId, gt.TYPE_KEEP_ALIVE, nil)
+	keepAlivePacket := make([]byte, size)
+	copy(keepAlivePacket, packet)
+	
+	headerSize := gt.MakeMessage(packet, globalSessionId, gt.TYPE_DATA, nil)
+	buf := packet[headerSize:]
 	
 	for {
-		size, remoteAddr, err := forwardListener.ReadFromUDP(recvBuf)
+		forwardListener.SetReadDeadline(time.Now().Add(10 * time.Second))
+		size, remoteAddr, err := forwardListener.ReadFromUDP(buf)
+		
+		serverAddr := (*net.UDPAddr)(atomic.LoadPointer(&serverAddrPtr))
+		atomic.StorePointer(&localAddrPtr, unsafe.Pointer(remoteAddr))
 		if err != nil {
+			if opError, ok := err.(*net.OpError); ok && opError.Timeout() {
+				// Read timeout, send keep alive packet
+				serverConn.WriteToUDP(keepAlivePacket, serverAddr)
+				continue
+			}
 			log.Printf("ClientForwardRecv: %v+\n", err)
 			continue
 		}
 		
-		atomic.StorePointer(&localAddrPtr, unsafe.Pointer(remoteAddr))
-		
-		serverAddr := (*net.UDPAddr)(atomic.LoadPointer(&serverAddrPtr))
-
-		_, err = serverConn.WriteToUDP(buf[:headerSize + size], serverAddr)
-		if err != nil {
-			log.Printf("DATA: Send to server: %v+\n", err)
-		}
+		serverConn.WriteToUDP(packet[:headerSize + size], serverAddr)
 	}
 }
 
-func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.UDPConn) {
+func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.UDPConn, input chan int) {
 	buf := make([]byte, 1500)
+	connected := false
 
 	for {
 		size, remoteAddr, err := relayConn.ReadFromUDP(buf)
@@ -70,47 +78,69 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 				log.Print("QUERY_ANWSER: Packet too short\n")
 				continue
 			}
-			ip := make([]byte, len(data) - 2)
-			copy(ip, data)
-			if err != nil {
-				log.Print("QUERY_ANSWER: Cannot parse IP\n")
-				continue
-			}
-			port := binary.LittleEndian.Uint16(data[len(data) - 2:])
-			addr := &net.UDPAddr{ip, int(port), ""}
+			addr := gt.BytesToUDPAddr(data)
 			
 			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(addr))
-			log.Printf("Got query answer, server %d has addr %s\n", targetId, addr.String())
+			log.Printf("Got query answer, server %d has addr %s\n",
+				targetId, addr.String())
 
-		case gt.TYPE_DATA:
+		case gt.TYPE_DATA, gt.TYPE_KEEP_ALIVE:
 			if sessionId != globalSessionId {
-				log.Print("DATA: Wrong sessionId\n")
+				log.Printf("DATA: Wrong sessionId %d\n", sessionId)
 				continue
 			}
+			input <- 0
 			// TODO: notify relay if this address changed?
 			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(remoteAddr))
 			
-			localAddr := (*net.UDPAddr)(atomic.LoadPointer(&localAddrPtr))
-
-			_, err := localSendConn.WriteToUDP(data, localAddr)
-			if err != nil {
-				log.Printf("DATA: Write to local: %v+\n", err)
+			if typeId == gt.TYPE_DATA {
+				localAddr := (*net.UDPAddr)(atomic.LoadPointer(&localAddrPtr))
+				
+				_, err := localSendConn.WriteToUDP(data, localAddr)
+				if err != nil {
+					log.Printf("DATA: Write to local: %v+\n", err)
+				}
+			}
+			if !connected {
+				log.Printf("Connected to server %d, remote addr %s\n",
+					targetId, remoteAddr.String())
+				connected = true
 			}
 
-		case gt.TYPE_SERVER_KEEP_ALIVE:
-		
 		default:
 			log.Printf("ParseMessage: Unknown typeId: %d\n", typeId)
 		}
 	}
 }
 
-func clientQuerySend(relayConn *net.UDPConn, relayAddr *net.UDPAddr, targetId int) {
+func clientCheckTimeout(input chan int) {
+	for {
+		t := time.NewTimer(25 * time.Second)
+		select {
+		case <-input:
+			t.Stop()
+		case <-t.C:
+			log.Print("No data from server in 25 seconds. Reconnecting...")
+			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(nil))
+			die <- 0
+		}
+	}
+}
+
+func clientQuerySend(relayConn *net.UDPConn, relayAddr *net.UDPAddr, targetId uint32, reverseConnect bool) {
 	query := make([]byte, 1500)
-	t := make([]byte, 4)
-	binary.LittleEndian.PutUint32(t, uint32(targetId))
-	size := gt.MakeMessage(query, 0, gt.TYPE_QUERY, t)
-	query = query[:size]
+	if reverseConnect {
+		t := make([]byte, 8)
+		binary.LittleEndian.PutUint32(t[:4], targetId)
+		binary.LittleEndian.PutUint32(t[4:], globalSessionId)
+		size := gt.MakeMessage(query, 0, gt.TYPE_REVERSE_CONNECT, t)
+		query = query[:size]
+	} else {
+		t := make([]byte, 4)
+		binary.LittleEndian.PutUint32(t, targetId)
+		size := gt.MakeMessage(query, 0, gt.TYPE_QUERY, t)
+		query = query[:size]
+	}
 	
 	for {
 		_, err := relayConn.WriteToUDP(query, relayAddr)
@@ -118,12 +148,16 @@ func clientQuerySend(relayConn *net.UDPConn, relayAddr *net.UDPAddr, targetId in
 			log.Printf("ClientQuerySend: %v+\n", err)
 		}
 		
-		timeout := 10
+		timeout := 20
 		target := (*net.UDPAddr)(atomic.LoadPointer(&serverAddrPtr))
 		if target == nil {
 			timeout = 2
 		}
-		time.Sleep(time.Duration(timeout) * time.Second)
+		t := time.After(time.Duration(timeout) * time.Second)
+		select {
+		case <-t:
+		case <-die:
+		}
 	}
 }
 
@@ -153,6 +187,10 @@ func main() {
 			Value: "7",
 			Usage: "target server id",
 		},
+		cli.StringFlag{
+			Name: "reverse-connect,R",
+			Usage: "ask server to connect client",
+		},
 	}
 	
 	myApp.Action = func(c *cli.Context) error {
@@ -169,12 +207,16 @@ func main() {
 		forwardListener, err := net.ListenUDP("udp", forwardAddr)
 		gt.CheckError(err)
 		
-		targetId := c.Int("server-id")
+		targetId := uint32(c.Int("server-id"))
+		reverseConnect := c.Bool("reverse-connect")
 		globalSessionId = rand.Uint32()
 		
-		go clientQuerySend(listener, relayAddr, targetId)
+		go clientQuerySend(listener, relayAddr, targetId, reverseConnect)
 		go clientForward(forwardListener, listener)
-		clientMainRecv(listener, uint32(targetId), forwardListener)
+		input := make(chan int)
+		die = make(chan int)
+		go clientCheckTimeout(input)
+		clientMainRecv(listener, uint32(targetId), forwardListener, input)
 		
 		return nil
 	}
