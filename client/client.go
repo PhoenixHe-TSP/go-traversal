@@ -72,10 +72,6 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 		
 		switch typeId {
 		case gt.TYPE_QUERY_ANSWER:
-			if len(data) < 10 {
-				log.Print("QUERY_ANWSER: Packet too short\n")
-				continue
-			}
 			addr := gt.BytesToUDPAddr(data)
 			
 			atomic.StorePointer(&serverAddrPtr, unsafe.Pointer(addr))

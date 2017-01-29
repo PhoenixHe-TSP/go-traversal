@@ -76,7 +76,7 @@ func main() {
 				// Write to server: connect request
 				size = gt.MakeMessage(buf, sessionId, gt.TYPE_REVERSE_CONNECT, nil)
 				size += gt.UDPAddrToBytes(remoteAddr, buf[size:])
-				_, err = listener.WriteToUDP(buf[:size+2], serverAddr)
+				_, err = listener.WriteToUDP(buf[:size], serverAddr)
 				if err != nil {
 					log.Printf("Write UDP: %+v\n", err)
 				}
