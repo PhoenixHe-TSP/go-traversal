@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	TYPE_DATA            = 1
-	TYPE_QUERY           = 2
-	TYPE_QUERY_ANSWER    = 3
-	TYPE_KEEP_ALIVE      = 4
-	TYPE_REVERSE_CONNECT = 5
+	TYPE_DATA         = 1
+	TYPE_QUERY        = 2
+	TYPE_QUERY_ANSWER = 3
+	TYPE_KEEP_ALIVE   = 4
+	TYPE_CONNECT      = 5
 )
 
 func MakeMessage(packet []byte, sessionId uint32, typeId uint8, content []byte) (size int) {
@@ -67,8 +67,8 @@ func UDPAddrToBytes(addr *net.UDPAddr, output []byte) (size int) {
 }
 
 func BytesToUDPAddr(input []byte) (*net.UDPAddr) {
-	ip := (net.IP)(make([]byte, len(input)-2))
+	ip := (net.IP)(make([]byte, len(input) - 2))
 	copy(ip, input)
-	port := int(binary.LittleEndian.Uint16(input[len(input)-2:]))
+	port := int(binary.LittleEndian.Uint16(input[len(input) - 2:]))
 	return &net.UDPAddr{ip, port, ""}
 }

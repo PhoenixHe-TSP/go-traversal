@@ -13,9 +13,10 @@ import (
 )
 
 type forwardConn struct {
-	localConn, remoteConn *net.UDPConn
-	remoteAddr unsafe.Pointer
-	input, die chan int
+	localConn           *net.UDPConn
+	remoteAddr          unsafe.Pointer
+	remoteAddrCandidate unsafe.Pointer
+	input, die          chan int
 }
 
 func serverKeepAlive(relayConn *net.UDPConn, relayAddr *net.UDPAddr, serverId uint32) {
@@ -24,37 +25,45 @@ func serverKeepAlive(relayConn *net.UDPConn, relayAddr *net.UDPAddr, serverId ui
 	binary.LittleEndian.PutUint32(t, serverId)
 	size := gt.MakeMessage(packet, 0, gt.TYPE_KEEP_ALIVE, t)
 	packet = packet[:size]
-
+	
 	for {
 		_, err := relayConn.WriteToUDP(packet, relayAddr)
 		if err != nil {
 			log.Printf("ServerKeepAlive: %v+\n", err)
 		}
-
+		
 		time.Sleep(10 * time.Second)
 	}
 }
 
-func serverForward(c *forwardConn, sessionId uint32) {
+func serverForward(c *forwardConn, remoteConn *net.UDPConn, sessionId uint32) {
 	packet := make([]byte, 1500)
 	size := gt.MakeMessage(packet, sessionId, gt.TYPE_KEEP_ALIVE, nil)
 	keepAlivePacket := make([]byte, size)
 	copy(keepAlivePacket, packet)
 	
-	remoteAddr := (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
-	c.remoteConn.WriteToUDP(keepAlivePacket, remoteAddr)
-	
 	headerSize := gt.MakeMessage(packet, sessionId, gt.TYPE_DATA, nil)
 	buf := packet[headerSize:]
 	
 	for {
-		c.localConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		remoteAddr := (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
+		if remoteAddr == nil {
+			remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddrCandidate))
+		}
+		timeout := 10
+		if remoteAddr == nil {
+			timeout = 2
+		}
+		c.localConn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		size, err := c.localConn.Read(buf)
 		
-		remoteAddr := (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
+		remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
+		if remoteAddr == nil {
+			remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddrCandidate))
+		}
 		
 		select {
-		case <- c.die:
+		case <-c.die:
 			log.Printf("Session %d timeouts, remoteAddr %s\n", sessionId, remoteAddr.String())
 			return
 		default:
@@ -63,14 +72,14 @@ func serverForward(c *forwardConn, sessionId uint32) {
 		if err != nil {
 			if opError, ok := err.(*net.OpError); ok && opError.Timeout() {
 				// Read timeout, send keep alive packet
-				c.remoteConn.WriteToUDP(keepAlivePacket, remoteAddr)
+				remoteConn.WriteToUDP(keepAlivePacket, remoteAddr)
 				continue
 			}
 			log.Printf("ServerForward: Read: %v+\n", err)
 			continue
 		}
-
-		_, err = c.remoteConn.WriteToUDP(packet[:size + headerSize], remoteAddr)
+		
+		_, err = remoteConn.WriteToUDP(packet[:size + headerSize], remoteAddr)
 		if err != nil {
 			log.Printf("Forward write: %v+\n", err)
 		}
@@ -108,7 +117,7 @@ LOOP:
 		}
 		
 		// Clear all the timeouts
-CLEAR_TIMEOUT:
+	CLEAR_TIMEOUT:
 		for {
 			select {
 			case sessionId := <-timeouts:
@@ -128,13 +137,13 @@ CLEAR_TIMEOUT:
 			log.Printf("ParseMessage: %+v\n", err)
 			continue
 		}
-
+		
 		switch typeId {
 		case gt.TYPE_DATA, gt.TYPE_KEEP_ALIVE:
-			
-		case gt.TYPE_REVERSE_CONNECT:
+		
+		case gt.TYPE_CONNECT:
 			remoteAddr = gt.BytesToUDPAddr(data)
-
+		
 		default:
 			log.Printf("ParseMessage: Unknown typeId: %d\n", typeId)
 			continue LOOP
@@ -147,22 +156,27 @@ CLEAR_TIMEOUT:
 				log.Printf("net.DialUDP: %v+\n", err)
 				continue
 			}
-			c = &forwardConn{conn, listener, unsafe.Pointer(remoteAddr), make(chan int), make(chan int)}
+			c = &forwardConn{conn, unsafe.Pointer(nil), unsafe.Pointer(nil), make(chan int), make(chan int)}
 			clientConns[sessionId] = c
 			log.Printf("Accept new session %d from %s\n", sessionId, remoteAddr.String())
-			go serverForward(c, sessionId)
+			go serverForward(c, listener, sessionId)
 			go serverCheckTimeout(c, sessionId, timeouts)
-			
 		} else {
 			c.input <- 0
-			atomic.StorePointer(&c.remoteAddr, unsafe.Pointer(remoteAddr))
 		}
-
+		
 		if typeId == gt.TYPE_DATA {
+			oldRemoteAddr := (*net.UDPAddr)(atomic.SwapPointer(&c.remoteAddr, unsafe.Pointer(remoteAddr)))
+			if oldRemoteAddr == nil {
+				log.Printf("Connected to client session %d, addr %s\n", sessionId, remoteAddr.String())
+			}
+			
 			_, err = c.localConn.Write(data)
 			if err != nil {
 				log.Printf("Local write: %v+\n", err)
 			}
+		} else {
+			atomic.StorePointer(&c.remoteAddrCandidate, unsafe.Pointer(remoteAddr))
 		}
 	}
 }
@@ -192,26 +206,26 @@ func main() {
 			Usage: "this server id",
 		},
 	}
-
+	
 	myApp.Action = func(c *cli.Context) error {
 		listenAddr, err := net.ResolveUDPAddr("udp4", c.String("listen"))
 		gt.CheckError(err)
 		listener, err := net.ListenUDP("udp4", listenAddr)
 		gt.CheckError(err)
-
+		
 		relayAddr, err := net.ResolveUDPAddr("udp4", c.String("relay"))
 		gt.CheckError(err)
-
+		
 		forwardAddr, err := net.ResolveUDPAddr("udp", c.String("forward"))
 		gt.CheckError(err)
-
+		
 		serverId := uint32(c.Uint("server-id"))
-
+		
 		go serverKeepAlive(listener, relayAddr, serverId)
 		serverMainRecv(listener, forwardAddr)
-
+		
 		return nil
 	}
-
+	
 	myApp.Run(os.Args)
 }

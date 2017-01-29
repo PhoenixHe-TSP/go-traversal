@@ -19,7 +19,7 @@ func main() {
 	myApp.Name = "go-traversal-relay"
 	myApp.Flags = []cli.Flag{
 		cli.StringFlag{
-			Name:	"listen,l",
+			Name:  "listen,l",
 			Value: ":8007",
 			Usage: "local listen address",
 		},
@@ -30,7 +30,7 @@ func main() {
 		gt.CheckError(err)
 		listener, err := net.ListenUDP("udp4", listenAddr)
 		gt.CheckError(err)
-
+		
 		cache := cmap.New()
 		buf := make([]byte, 1500)
 		
@@ -40,7 +40,7 @@ func main() {
 				log.Printf("ReadFromUDP: %+v\n", err)
 				continue
 			}
-
+			
 			data, sessionId, typeId, err := gt.ParseMessage(buf[:size])
 			if err != nil {
 				log.Printf("ParseMessage: %+v\n", err)
@@ -52,7 +52,7 @@ func main() {
 			}
 			targetId := binary.LittleEndian.Uint32(data[:4])
 			data = data[4:]
-
+			
 			switch typeId {
 			case gt.TYPE_QUERY:
 				targetAddr, found := cache.Get(string(targetId))
@@ -74,13 +74,13 @@ func main() {
 				}
 				
 				// Write to server: connect request
-				size = gt.MakeMessage(buf, sessionId, gt.TYPE_REVERSE_CONNECT, nil)
+				size = gt.MakeMessage(buf, sessionId, gt.TYPE_CONNECT, nil)
 				size += gt.UDPAddrToBytes(remoteAddr, buf[size:])
 				_, err = listener.WriteToUDP(buf[:size], serverAddr)
 				if err != nil {
 					log.Printf("Write UDP: %+v\n", err)
 				}
-
+			
 			case gt.TYPE_KEEP_ALIVE:
 				targetAddr := make([]byte, len(remoteAddr.IP) + 2)
 				gt.UDPAddrToBytes(remoteAddr, targetAddr)
@@ -92,6 +92,6 @@ func main() {
 			}
 		}
 	}
-
+	
 	myApp.Run(os.Args)
 }
