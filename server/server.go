@@ -36,31 +36,34 @@ func serverKeepAlive(relayConn *net.UDPConn, relayAddr *net.UDPAddr, serverId ui
 	}
 }
 
+func getClientAddr(c *forwardConn) *net.UDPAddr {
+	remoteAddr := (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
+	if remoteAddr == nil {
+		remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddrCandidate))
+	}
+	
+	return remoteAddr
+}
+
 func serverForward(c *forwardConn, remoteConn *net.UDPConn, sessionId uint32) {
 	packet := make([]byte, 1500)
 	size := gt.MakeMessage(packet, sessionId, gt.TYPE_KEEP_ALIVE, nil)
 	keepAlivePacket := make([]byte, size)
 	copy(keepAlivePacket, packet)
+	remoteConn.WriteToUDP(keepAlivePacket, getClientAddr(c))
 	
 	headerSize := gt.MakeMessage(packet, sessionId, gt.TYPE_DATA, nil)
 	buf := packet[headerSize:]
 	
 	for {
 		remoteAddr := (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
-		if remoteAddr == nil {
-			remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddrCandidate))
-		}
 		timeout := 10
 		if remoteAddr == nil {
 			timeout = 2
 		}
 		c.localConn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		size, err := c.localConn.Read(buf)
-		
-		remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddr))
-		if remoteAddr == nil {
-			remoteAddr = (*net.UDPAddr)(atomic.LoadPointer(&c.remoteAddrCandidate))
-		}
+		remoteAddr = getClientAddr(c)
 		
 		select {
 		case <-c.die:

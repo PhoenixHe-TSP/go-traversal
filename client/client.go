@@ -21,11 +21,21 @@ var (
 	die                         chan int
 )
 
-func clientForward(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
+func getServerAddr() *net.UDPAddr {
+	serverAddr := (*net.UDPAddr)(atomic.LoadPointer(&serverAddrPtr))
+	if serverAddr == nil {
+		serverAddr = (*net.UDPAddr)(atomic.LoadPointer(&serverAddrCandidatePtr))
+	}
+	return serverAddr
+}
+
+func clientForwardUDP(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
 	packet := make([]byte, 1500)
 	size := gt.MakeMessage(packet, globalSessionId, gt.TYPE_KEEP_ALIVE, nil)
 	keepAlivePacket := make([]byte, size)
 	copy(keepAlivePacket, packet)
+	
+	serverConn.WriteToUDP(keepAlivePacket, getServerAddr())
 	
 	headerSize := gt.MakeMessage(packet, globalSessionId, gt.TYPE_DATA, nil)
 	buf := packet[headerSize:]
@@ -39,16 +49,12 @@ func clientForward(forwardListener *net.UDPConn, serverConn *net.UDPConn) {
 		
 		forwardListener.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		size, remoteAddr, err := forwardListener.ReadFromUDP(buf)
-		atomic.StorePointer(&localAddrPtr, unsafe.Pointer(remoteAddr))
-		
-		serverAddr = (*net.UDPAddr)(atomic.LoadPointer(&serverAddrPtr))
-		if serverAddr == nil {
-			serverAddr = (*net.UDPAddr)(atomic.LoadPointer(&serverAddrCandidatePtr))
-		}
+		serverAddr = getServerAddr()
 		
 		if err != nil {
 			if opError, ok := err.(*net.OpError); ok && opError.Timeout() {
 				// Read timeout, send keep alive packet
+				atomic.StorePointer(&localAddrPtr, unsafe.Pointer(remoteAddr))
 				serverConn.WriteToUDP(keepAlivePacket, serverAddr)
 				continue
 			}
@@ -89,7 +95,10 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 				targetId, addr.String())
 		
 		case gt.TYPE_DATA, gt.TYPE_KEEP_ALIVE:
-			input <- 0
+			select {
+			case input <- 0:
+			default:
+			}
 			oldServerAddr := (*net.UDPAddr)(atomic.SwapPointer(&serverAddrPtr, unsafe.Pointer(remoteAddr)))
 			if oldServerAddr == nil {
 				log.Printf("Connected to server %d, remote addr %s\n",
@@ -104,7 +113,7 @@ func clientMainRecv(relayConn *net.UDPConn, targetId uint32, localSendConn *net.
 					log.Printf("DATA: Write to local: %v+\n", err)
 				}
 			}
-		
+			
 		default:
 			log.Printf("ParseMessage: Unknown typeId: %d\n", typeId)
 		}
@@ -188,20 +197,20 @@ func main() {
 		relayAddr, err := net.ResolveUDPAddr("udp4", c.String("relay"))
 		gt.CheckError(err)
 		
-		forwardAddr, err := net.ResolveUDPAddr("udp", c.String("forward"))
+		forwardUDPAddr, err := net.ResolveUDPAddr("udp", c.String("forward"))
 		gt.CheckError(err)
-		forwardListener, err := net.ListenUDP("udp", forwardAddr)
+		forwardUDPListener, err := net.ListenUDP("udp", forwardUDPAddr)
 		gt.CheckError(err)
 		
 		targetId := uint32(c.Int("server-id"))
 		globalSessionId = rand.Uint32()
 		
 		go clientQuerySend(listener, relayAddr, targetId)
-		go clientForward(forwardListener, listener)
-		input := make(chan int)
-		die = make(chan int)
+		go clientForwardUDP(forwardUDPListener, listener)
+		input := make(chan int, 1)
+		die = make(chan int, 1)
 		go clientCheckTimeout(input)
-		clientMainRecv(listener, uint32(targetId), forwardListener, input)
+		clientMainRecv(listener, uint32(targetId), forwardUDPListener, input)
 		
 		return nil
 	}
